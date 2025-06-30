@@ -1,0 +1,60 @@
+pipeline {
+    agent none
+    triggers {
+        cron('0 1 * * *')
+    }
+    parameters {
+        text(name: 'DUMMY_DB_CONFIG_JSON', defaultValue: '''
+		{
+			"dummyDbList": [
+				{
+					"DUMMY_SERVER_HOST": "dummy.server.com",
+					"DUMMY_PORT_NUMBER": "5432",
+					"DUMMY_SEC_ID": "dummyDbCredentialId",
+					"DUMMY_DATABASE_NAME": "dummy_database_one"
+				},
+				{
+					"DUMMY_SERVER_HOST": "another.dummy.server.net",
+					"DUMMY_PORT_NUMBER": "5432",
+					"DUMMY_SEC_ID": "anotherDummyDbCredentialId",
+					"DUMMY_DATABASE_NAME": "dummy_database_two"
+				}
+			]
+		} ''')
+        string(name: 'DUMMY_SMB_SHARE_CREDENTIAL_ID', defaultValue: 'dummySmbUser', description: 'Jenkins credential ID for SMB share access')
+        string(name: 'DUMMY_SMB_SHARE_PATH', defaultValue: '//dummy.smb.share.com/DummyShare/backup', description: 'Path to the SMB share for backups')
+    }
+    options {
+        skipDefaultCheckout true
+    }
+    stages {	
+        stage('Postgres backup') {
+            steps {
+                podTemplate(containers: [containerTemplate(name: 'postgres', image: "docker.com/postgresql:15", command: 'sh', ttyEnabled: true, resourceRequestCpu: '500m', resourceLimitCpu: '500m', resourceRequestMemory: '1024Mi', resourceLimitMemory: '1024Mi' ),
+                                         containerTemplate(name: 'smbclient', image: "docker.com/smbclient:0.1", command: 'sh', ttyEnabled: true, resourceRequestCpu: '500m', resourceLimitCpu: '500m', resourceRequestMemory: '1024Mi', resourceLimitMemory: '1024Mi')]) {
+                    node(POD_LABEL) {
+                        container('postgres') {
+                            script {
+                                Map dummyDbJsonList = readJSON text: params.DUMMY_DB_CONFIG_JSON								
+                                dummyDbJsonList.dummyDbList.each { dummyDb ->
+                                    withCredentials([usernamePassword(credentialsId: dummyDb.DUMMY_SEC_ID, usernameVariable: 'DB_USERNAME', passwordVariable: 'DB_PASSWORD')]) {
+                                        def today = new Date()
+                                        def timeStmp = today.format("yyyyMMddhhmmss")
+                                        sh(label: "pg backup", script: "pg_dump --dbname=postgresql://\$DB_USERNAME:\$DB_PASSWORD@${dummyDb.DUMMY_SERVER_HOST}:${dummyDb.DUMMY_PORT_NUMBER}/${dummyDb.DUMMY_DATABASE_NAME} -F t > pg_${dummyDb.DUMMY_DATABASE_NAME}_${timeStmp}.tar")
+                                    }
+                                }
+                            }
+                        }
+                        container('smbclient') {
+                            script {
+                                withCredentials([usernamePassword(credentialsId: params.DUMMY_SMB_SHARE_CREDENTIAL_ID, usernameVariable: 'DRIVE_USERNAME', passwordVariable: 'DRIVE_PASSWORD')]) {
+                                    sh "smbclient -m smb2 ${params.DUMMY_SMB_SHARE_PATH} -U \$DRIVE_USERNAME%\$DRIVE_PASSWORD -c 'prompt OFF; cd backup; mput pg*.tar '"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
